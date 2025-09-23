@@ -1,59 +1,56 @@
+import os
 import glob
-from langchain_community.vectorstores import Chroma
-from langchain_huggingface.embeddings import HuggingFaceEmbeddings  
-from langchain.docstore.document import Document
+import pickle
+import numpy as np
+import faiss
+from joblib import Parallel, delayed
+from sentence_transformers import SentenceTransformer
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from src.config import CHROMA_DB_DIR, LOG_DIR
-
+from langchain.docstore.document import Document
+from src.config import LOG_DIR, CACHE_DIR, EMBEDDING_MODEL
 
 def load_logs():
-    """
-    Load all .txt log files from LOG_DIR and return them as a list of Document objects.
-    """
-    # Find all text files inside the log directory
     files = glob.glob(f"{LOG_DIR}/*.txt")
-    
     docs = []
     for file in files:
-        # Open each log file and read its content
-        with open(file, 'r') as f:
-            content = f.read()
-        
-        # Wrap content inside a LangChain Document with metadata
-        docs.append(Document(
-            page_content=content,
-            metadata={"source": file}
-        ))
-
+        with open(file, 'r', encoding="utf-8", errors="ignore") as f:
+            lines = [line for line in f if "ERROR" in line or "Exception" in line]
+        content = "\n".join(lines)
+        docs.append(Document(page_content=content, metadata={"source": os.path.basename(file)}))
     return docs
 
-
-def chunk_and_store(docs):
-    """
-    Split the documents into smaller chunks, embed them, 
-    and store them in a persistent Chroma database.
-    """
-    # Split documents into smaller chunks for better embeddings and retrieval
+def chunk_logs(docs):
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,      # Max characters per chunk
-        chunk_overlap=100,    # Overlap between chunks (for context preservation)
-        separators=["\n\n", "\n", " ", ""]  # How to split text
+        chunk_size=1500,
+        chunk_overlap=100,
+        separators=["\n\n", "\n", " ", ""]
     )
-    
-    # Break the documents into chunks
-    chunks = splitter.split_documents(docs)
+    return splitter.split_documents(docs)
 
-    # Load sentence-transformer embeddings model
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
-    )
+def build_faiss_index(chunks):
+    texts = []
+    for chunk in chunks:
+        source = chunk.metadata.get("source", "unknown")
+        text = f"[Service: {source}]\n{chunk.page_content}"
+        texts.append(text)
 
-    # Store chunks in Chroma vector database (with persistence enabled)
-    db = Chroma.from_documents(
-        chunks,
-        embeddings,
-        persist_directory=CHROMA_DB_DIR
-    )
+    model = SentenceTransformer(EMBEDDING_MODEL)
+    embeddings = model.encode(texts, batch_size=32, show_progress_bar=True)
+    embeddings = np.array(embeddings).astype("float32")
 
-    # Save the database to disk
-    db.persist()
+    index = faiss.IndexFlatL2(embeddings.shape[1])
+    index.add(embeddings)
+
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    faiss.write_index(index, os.path.join(CACHE_DIR, "faiss.index"))
+    with open(os.path.join(CACHE_DIR, "texts.pkl"), "wb") as f:
+        pickle.dump(texts, f)
+
+    return index, texts, model
+
+def load_cached_index():
+    index = faiss.read_index(os.path.join(CACHE_DIR, "faiss.index"))
+    with open(os.path.join(CACHE_DIR, "texts.pkl"), "rb") as f:
+        texts = pickle.load(f)
+    model = SentenceTransformer(EMBEDDING_MODEL)
+    return index, texts, model

@@ -1,8 +1,11 @@
 import shutil
-from src.config import REPORT_DIR, CHROMA_DB_DIR
+import os
+from src.config import REPORT_DIR, CACHE_DIR
 
 def clean_reports():
-    shutil.rmtree(REPORT_DIR, ignore_errors=True)
+    if os.path.exists(REPORT_DIR):
+        shutil.rmtree(REPORT_DIR)
 
-def clean_chroma():
-    shutil.rmtree(CHROMA_DB_DIR, ignore_errors=True)
+def clean_cache():
+    if os.path.exists(CACHE_DIR):
+        shutil.rmtree(CACHE_DIR)

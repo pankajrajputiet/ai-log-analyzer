@@ -1,63 +1,53 @@
 import os
-from langchain_community.vectorstores import Chroma
-from langchain_huggingface.embeddings import HuggingFaceEmbeddings
-from langchain.chains import RetrievalQA
+from langchain.chains import LLMChain
+from langchain.prompts import PromptTemplate
 from langchain_groq import ChatGroq
-from src.config import GROQ_API_KEY, CHROMA_DB_DIR, REPORT_DIR
+from src.config import GROQ_API_KEY, REPORT_DIR, TOP_K_RESULTS
 
-
-# Instantiate Groq Large Language Model (LLM)
 llm = ChatGroq(
-    temperature=0,                 # Deterministic output (no randomness)
-    groq_api_key=GROQ_API_KEY,     # API key from config
-    model_name="openai/gpt-oss-120b"  # ✅ Choose a supported model
+    temperature=0,
+    groq_api_key=GROQ_API_KEY,
+    model_name="openai/gpt-oss-120b"
 )
 
+prompt_template = PromptTemplate.from_template("""
+Analyze the following log snippets and generate a Markdown table with the following columns:
 
-def generate_report():
-    """
-    Generate an error analysis report from logs stored in Chroma DB.
-    Steps:
-    1. Load embeddings model.
-    2. Load Chroma vector database.
-    3. Build a retrieval-based QA chain.
-    4. Ask the LLM to analyze logs for errors and solutions.
-    5. Save results into a report file.
-    """
+| Service Name | Data Center Name | Error | Expected Solution |
 
-    # 1. Load Hugging Face embeddings model
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
-    )
+Instructions:
+- Extract the **Service Name** from the file name in metadata or from any mention in the log.
+- Extract the **Data Center Name** from the log content (look for patterns like 'DC=', 'datacenter=', etc.).
+- Identify the **Error** from the log messages.
+- Suggest an **Expected Solution** based on the error.
 
-    # 2. Load Chroma vector store (persistent database of embeddings)
-    db = Chroma(
-        persist_directory=CHROMA_DB_DIR,
-        embedding_function=embeddings
-    )
+Logs:
+{context}
+""")
 
-    # 3. Create retriever and QA chain
-    retriever = db.as_retriever()  # Retriever to fetch relevant log chunks
-    qa_chain = RetrievalQA.from_chain_type(
-        llm=llm,                     # LLM to generate answers
-        retriever=retriever,         # Retriever for context
-        chain_type="stuff"           # Chain type: stuff = simple context stuffing
-    )
+qa_chain = LLMChain(llm=llm, prompt=prompt_template)
 
-    # 4. Run query on the logs
-    query = "Analyze the logs and list all errors with appropriate solutions."
-    result = qa_chain.invoke(query)
+def search_similar_chunks(query, index, texts, model, top_k=TOP_K_RESULTS):
+    query_embedding = model.encode([query]).astype("float32")
+    distances, indices = index.search(query_embedding, top_k)
+    return [texts[i] for i in indices[0]]
 
-    # 5. Extract response text
-    if isinstance(result, dict):
-        result_text = result.get("result", str(result))
-    else:
-        result_text = str(result)
+def compress_chunk(text):
+    lines = text.splitlines()
+    return "\n".join([line for line in lines if "ERROR" in line or "Exception" in line or "DC=" in line])
 
-    # 6. Save report to file
-    os.makedirs(REPORT_DIR, exist_ok=True)  # Ensure directory exists
+def generate_report(index, texts, model):
+    query = "Analyze logs for errors and suggest fixes"
+    relevant_chunks = search_similar_chunks(query, index, texts, model)
+    compressed = [compress_chunk(c) for c in relevant_chunks]
+    context = "\n\n".join(compressed)
+
+    result = qa_chain.invoke({"context": context})
+    result_text = result["text"] if isinstance(result, dict) else str(result)
+
+    os.makedirs(REPORT_DIR, exist_ok=True)
     report_path = os.path.join(REPORT_DIR, "error_report.txt")
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(result_text)
-        
-        
+
+    print(f"✅ Report generated: {report_path}")
