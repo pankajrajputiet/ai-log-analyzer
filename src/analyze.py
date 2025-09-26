@@ -1,69 +1,63 @@
 import os
-from langchain.prompts import PromptTemplate
+from langchain_community.vectorstores import Chroma
+from langchain_huggingface.embeddings import HuggingFaceEmbeddings
+from langchain.chains import RetrievalQA
 from langchain_groq import ChatGroq
-from src.config import GROQ_API_KEY, REPORT_DIR
-from src.ingest import load_logs
+from src.config import GROQ_API_KEY, CHROMA_DB_DIR, REPORT_DIR
 
-# Initialize Groq LLM
+
+# Instantiate Groq Large Language Model (LLM)
 llm = ChatGroq(
-    temperature=0,
-    groq_api_key=GROQ_API_KEY,
-    model_name="openai/gpt-oss-120b"
+    temperature=0,                 # Deterministic output (no randomness)
+    groq_api_key=GROQ_API_KEY,     # API key from config
+    model_name="openai/gpt-oss-120b"  # ✅ Choose a supported model
 )
 
-# Prompt template for per-log analysis
-prompt_template = PromptTemplate.from_template("""
-Analyze the following log snippet and generate a single Markdown row:
 
-| Service Name | Data Center Name | Error | Expected Solution |
+def generate_report():
+    """
+    Generate an error analysis report from logs stored in Chroma DB.
+    Steps:
+    1. Load embeddings model.
+    2. Load Chroma vector database.
+    3. Build a retrieval-based QA chain.
+    4. Ask the LLM to analyze logs for errors and solutions.
+    5. Save results into a report file.
+    """
 
-Instructions:
-- Extract the **Service Name** from the file name or log content.
-- Extract the **Data Center Name** from patterns like 'DC=', 'datacenter='.
-- Identify the **Error** from the log messages.
-- Suggest an **Expected Solution**.
+    # 1. Load Hugging Face embeddings model
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
 
-Log:
-{context}
-""")
+    # 2. Load Chroma vector store (persistent database of embeddings)
+    db = Chroma(
+        persist_directory=CHROMA_DB_DIR,
+        embedding_function=embeddings
+    )
 
-# Combine prompt and LLM into a chain
-chain = prompt_template | llm
+    # 3. Create retriever and QA chain
+    retriever = db.as_retriever()  # Retriever to fetch relevant log chunks
+    qa_chain = RetrievalQA.from_chain_type(
+        llm=llm,                     # LLM to generate answers
+        retriever=retriever,         # Retriever for context
+        chain_type="stuff"           # Chain type: stuff = simple context stuffing
+    )
 
-def compress_chunk(text, max_lines=50):
-    lines = text.splitlines()
-    filtered = [line for line in lines if "ERROR" in line or "Exception" in line or "DC=" in line or "datacenter=" in line]
-    return "\n".join(filtered[:max_lines]) if filtered else text[:2000]  # fallback to first 2000 chars
+    # 4. Run query on the logs
+    query = "Analyze the logs and list all errors with appropriate solutions."
+    result = qa_chain.invoke(query)
 
-def generate_report(index=None, texts=None, model=None):
-    docs = load_logs()
-    rows = []
+    # 5. Extract response text
+    if isinstance(result, dict):
+        result_text = result.get("result", str(result))
+    else:
+        result_text = str(result)
 
-    for doc in docs:
-        compressed = compress_chunk(doc.page_content)
-        if not compressed.strip():
-            continue
-
-        try:
-            result = chain.invoke({"context": compressed})
-            row = result.strip() if isinstance(result, str) else str(result)
-            if row:
-                rows.append(row)
-        except Exception as e:
-            print(f"⚠️ Error processing {doc.metadata['source']}: {e}")
-
-    if not rows:
-        print("⚠️ No errors found in any log files.")
-        return False
-
-    # Assemble Markdown table
-    header = "| Service Name | Data Center Name | Error | Expected Solution |\n|--------------|------------------|-------|-------------------|"
-    table = "\n".join([header] + rows)
-
-    os.makedirs(REPORT_DIR, exist_ok=True)
+    # 6. Save report to file
+    os.makedirs(REPORT_DIR, exist_ok=True)  # Ensure directory exists
     report_path = os.path.join(REPORT_DIR, "error_report.txt")
     with open(report_path, "w", encoding="utf-8") as f:
-        f.write(table)
-
-    print(f"✅ Full report generated: {report_path}")
-    return True
+        f.write(result_text)
+        
+        
