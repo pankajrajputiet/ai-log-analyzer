@@ -4,6 +4,6 @@ langchain-community
 langchain-groq
 langchain-huggingface
 sentence-transformers
-chromadb
+faiss-cpu
 tiktoken
 python-dotenv
